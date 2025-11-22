@@ -42,6 +42,10 @@ class AdvancedOptionSignalGenerator:
     except Exception as e:
         print(f"❌ Error fetching {symbol}: {e}")
         return None
+            
+    except Exception as e:
+        print(f"❌ Error fetching {symbol}: {e}")
+        return None
           def analyze_atm_strikes(self, data, symbol):
     """Analyze only ATM ±5 strikes with complete data"""
     if not data or 'records' not in data:
