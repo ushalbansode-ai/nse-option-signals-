@@ -60,7 +60,7 @@ class AdvancedOptionSignalGenerator:
         except Exception as e:
             print(f"{PRINT_PREFIX} ❌ Error fetching {symbol}: {str(e)}")
             return None
-                def analyze_atm_strikes(self, data, symbol):
+    def analyze_atm_strikes(self, data, symbol):
         """Return dict with ATM +/-5 strike data and metadata."""
         if not data or 'records' not in data:
             return None
