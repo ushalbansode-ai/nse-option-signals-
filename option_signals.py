@@ -17,48 +17,63 @@ class AdvancedOptionSignalGenerator:
         ]
         
     def fetch_option_chain(self, symbol):
-        """Fetch complete option chain data from NSE"""
-        try:
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            }
-            
-            if symbol in ['NIFTY', 'BANKNIFTY']:
-                url = f"https://www.nseindia.com/api/option-chain-indices?symbol={symbol}"
-            else:
-                url = f"https://www.nseindia.com/api/option-chain-equities?symbol={symbol}"
-            
-            session = requests.Session()
-            session.get("https://www.nseindia.com", headers=headers, timeout=10)
-            response = session.get(url, headers=headers, timeout=10)
-            
-            if response.status_code == 200:
-                return response.json()
-            else:
-                print(f"âŒ Failed to fetch {symbol}: Status {response.status_code}")
-                return None
-                
-        except Exception as e:
-            print(f"âŒ Error fetching {symbol}: {e}")
+    """Fetch complete option chain data from NSE"""
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        
+        # Fixed symbol names and URL formatting
+        if symbol in ['NIFTY', 'BANKNIFTY']:
+            url = f"https://www.nseindia.com/api/option-chain-indices?symbol={symbol}"
+        else:
+            url = f"https://www.nseindia.com/api/option-chain-equities?symbol={symbol}"
+        
+        session = requests.Session()
+        session.get("https://www.nseindia.com", headers=headers, timeout=10)
+        response = session.get(url, headers=headers, timeout=10)
+        
+        if response.status_code == 200:
+            return response.json()
+        else:
+            print(f"❌ Failed to fetch {symbol}: Status {response.status_code}")
             return None
+            
+    except Exception as e:
+        print(f"❌ Error fetching {symbol}: {e}")
+        return None
           def analyze_atm_strikes(self, data, symbol):
-        """Analyze only ATM Â±5 strikes with complete data"""
-        if not data or 'records' not in data:
-            return None
-            
-        records = data['records']
-        current_price = records['underlyingValue']
-        expiry_dates = records['expiryDates']
-        
-        # Use nearest expiry
-        current_expiry = expiry_dates[0]
-        
-        # Filter data for current expiry
-        option_data = [item for item in data['records']['data'] 
-                      if item.get('expiryDate') == current_expiry]
-        
-        if not option_data:
-            return None
+    """Analyze only ATM ±5 strikes with complete data"""
+    if not data or 'records' not in data:
+        return None
+
+    records = data['records']
+    current_price = records['underlyingValue']
+    expiry_dates = records['expiryDates']
+    
+    # Use nearest expiry
+    current_expiry = expiry_dates[0]
+    
+    # Filter data for current expiry
+    option_data = [item for item in data['records']['data'] 
+                  if item.get('expiryDate') == current_expiry]
+    
+    if not option_data:
+        return None
+    
+    # Find ATM strike
+    strikes = [item['strikePrice'] for item in option_data]
+    atm_strike = min(strikes, key=lambda x: abs(x - current_price))
+    
+    # Get ONLY ±5 strikes from ATM
+    all_strikes = sorted(strikes)
+    atm_index = all_strikes.index(atm_strike)
+    start_idx = max(0, atm_index - 5)
+    end_idx = min(len(all_strikes), atm_index + 6)
+    
+    relevant_strikes = all_strikes[start_idx:end_idx]
+    relevant_data = [item for item in option_data 
+                    if item['strikePrice'] in relevant_strikes]
         
         # Find ATM strike
         strikes = [item['strikePrice'] for item in option_data]
