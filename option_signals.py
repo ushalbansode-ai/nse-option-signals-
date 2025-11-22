@@ -1,12 +1,17 @@
+#!/usr/bin/env python3
+# option_signals.py
+# Fixed and cleaned version of your Advanced NSE Option Signals script
+
 import requests
 import pandas as pd
 import numpy as np
-from datetime import datetime, time
+from datetime import datetime
 import time as time_module
 import json
 import os
+import math
 
-print("🛰️ ADVANCED NSE OPTION SIGNALS - COMPLETE ANALYSIS")
+PRINT_PREFIX = "🛰️"
 
 class AdvancedOptionSignalGenerator:
     def __init__(self):
@@ -16,197 +21,214 @@ class AdvancedOptionSignalGenerator:
             "KOTAKBANK", "HDFC", "BHARTIARTL", "ITC", "SBIN"
         ]
 
-    def fetch_option_chain(self, symbol):
-        """Fetch option chain from NSE"""
+    def _session(self):
+        """Return a requests session primed for NSE."""
+        s = requests.Session()
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+            'Accept-Language': 'en-US,en;q=0.9'
+        }
+        s.headers.update(headers)
+        # Try a warm request to the homepage (best-effort)
         try:
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
-            }
+            s.get("https://www.nseindia.com", timeout=5)
+        except Exception:
+            pass
+        return s
 
-            session = requests.Session()
-            session.get("https://www.nseindia.com", headers=headers, timeout=10)
-
+    def fetch_option_chain(self, symbol):
+        """Fetch option chain JSON from NSE for symbol."""
+        try:
+            session = self._session()
             if symbol in ['NIFTY', 'BANKNIFTY']:
                 url = f"https://www.nseindia.com/api/option-chain-indices?symbol={symbol}"
             else:
                 url = f"https://www.nseindia.com/api/option-chain-equities?symbol={symbol}"
 
-            response = session.get(url, headers=headers, timeout=10)
-
-            if response.status_code == 200:
-                return response.json()
+            r = session.get(url, timeout=12)
+            if r.status_code == 200:
+                return r.json()
             else:
-                print(f"❌ Failed {symbol}: {response.status_code}")
+                print(f"{PRINT_PREFIX} ❌ Failed to fetch {symbol}: HTTP {r.status_code}")
                 return None
-
         except Exception as e:
-            print(f"❌ Error fetching {symbol}: {e}")
+            print(f"{PRINT_PREFIX} ❌ Error fetching {symbol}: {e}")
             return None
-                def analyze_atm_strikes(self, data, symbol):
+
+    def analyze_atm_strikes(self, data, symbol):
+        """Return dict with ATM +/-5 strike data and metadata."""
         if not data or 'records' not in data:
             return None
 
-        records = data['records']
-        current_price = records['underlyingValue']
-        expiry_dates = records['expiryDates']
-        current_expiry = expiry_dates[0]
+        records = data.get('records', {})
+        current_price = records.get('underlyingValue', None)
+        expiry_dates = records.get('expiryDates', []) or []
 
-        option_data = [
-            item for item in data['records']['data']
-            if item.get('expiryDate') == current_expiry
-        ]
-
-        if not option_data:
+        if current_price is None or not expiry_dates:
             return None
 
-        strikes = [item['strikePrice'] for item in option_data]
+        # pick nearest expiry (first non-past if possible)
+        today = datetime.now().date()
+        parsed = []
+        for d in expiry_dates:
+            try:
+                parsed_dt = datetime.strptime(d, "%d-%b-%Y").date()
+                parsed.append(parsed_dt)
+            except Exception:
+                continue
+        parsed = sorted(parsed)
+        expiry_dt = next((dt for dt in parsed if dt >= today), parsed[0] if parsed else None)
+        if expiry_dt:
+            current_expiry = expiry_dt.strftime("%d-%b-%Y")
+        else:
+            current_expiry = expiry_dates[0]
+
+        option_rows = [item for item in records.get('data', []) if item.get('expiryDate') == current_expiry]
+        if not option_rows:
+            return None
+
+        # Build strike list and find nearest (ATM)
+        strikes = sorted({int(item.get('strikePrice', 0)) for item in option_rows})
+        if not strikes:
+            return None
+
+        # nearest strike
         atm_strike = min(strikes, key=lambda x: abs(x - current_price))
+        # pick ±5 strikes around ATM
+        try:
+            atm_index = strikes.index(atm_strike)
+        except ValueError:
+            atm_index = 0
+        start_idx = max(0, atm_index - 5)
+        end_idx = min(len(strikes), atm_index + 6)
+        relevant_strikes = strikes[start_idx:end_idx]
 
-        all_strikes = sorted(strikes)
-        atm_index = all_strikes.index(atm_strike)
-
-        start = max(0, atm_index - 5)
-        end = min(len(all_strikes), atm_index + 6)
-
-        relevant_strikes = all_strikes[start:end]
-
-        relevant_data = [
-            item for item in option_data
-            if item['strikePrice'] in relevant_strikes
-        ]
+        # filter rows for relevant strikes
+        relevant_rows = [r for r in option_rows if int(r.get('strikePrice', 0)) in relevant_strikes]
 
         return {
-            "symbol": symbol,
-            "current_price": current_price,
-            "atm_strike": atm_strike,
-            "expiry": current_expiry,
-            "strikes_analyzed": relevant_strikes,
-            "data": relevant_data,
-            "all_data": option_data
+            'symbol': symbol,
+            'current_price': float(current_price),
+            'atm_strike': int(atm_strike),
+            'expiry': current_expiry,
+            'strikes_analyzed': relevant_strikes,
+            'data': relevant_rows,
+            'all_data': option_rows
         }
 
-    def calculate_pcr(self, data):
+    def calculate_pcr(self, data_rows):
+        """Compute PCR based on aggregated OI and volume."""
         total_ce_oi = total_pe_oi = 0
         total_ce_vol = total_pe_vol = 0
 
-        for row in data:
-            if 'CE' in row:
-                ce = row['CE']
-                total_ce_oi += ce.get('openInterest', 0)
-                total_ce_vol += ce.get('totalTradedVolume', 0)
+        for r in data_rows:
+            ce = r.get('CE')
+            pe = r.get('PE')
+            if ce:
+                total_ce_oi += int(ce.get('openInterest', 0))
+                total_ce_vol += int(ce.get('totalTradedVolume', 0) or 0)
+            if pe:
+                total_pe_oi += int(pe.get('openInterest', 0))
+                total_pe_vol += int(pe.get('totalTradedVolume', 0) or 0)
 
-            if 'PE' in row:
-                pe = row['PE']
-                total_pe_oi += pe.get('openInterest', 0)
-                total_pe_vol += pe.get('totalTradedVolume', 0)
-
-        pcr_oi = total_pe_oi / total_ce_oi if total_ce_oi else 0
-        pcr_vol = total_pe_vol / total_ce_vol if total_ce_vol else 0
-
+        pcr_oi = (total_pe_oi / total_ce_oi) if total_ce_oi > 0 else 0.0
+        pcr_vol = (total_pe_vol / total_ce_vol) if total_ce_vol > 0 else 0.0
         return round(pcr_oi, 2), round(pcr_vol, 2)
-            def select_optimal_strike(self, analysis_data, option_type):
-        """Select optimal strike from ATM ±5 with multi-parameter scoring"""
+
+    def select_optimal_strike(self, analysis_data, option_type):
+        """Select strike from ATM window using multi-parameter scoring."""
         if not analysis_data:
             return None
 
         current_price = analysis_data['current_price']
-        atm_strike = analysis_data['atm_strike']
-        relevant_data = analysis_data['data']
+        atm = analysis_data['atm_strike']
+        rows = analysis_data['data']
         strikes_list = analysis_data['strikes_analyzed']
 
-        candidate_strikes = []
-
-        for item in relevant_data:
-            strike = item['strikePrice']
-
-            # Calculate index distance from ATM in the reduced strike list
+        candidates = []
+        for r in rows:
+            strike = int(r.get('strikePrice', 0))
             try:
-                strike_index = strikes_list.index(strike)
-                atm_index = strikes_list.index(atm_strike)
+                strike_idx = strikes_list.index(strike)
+                atm_idx = strikes_list.index(atm)
             except ValueError:
                 continue
-            distance_from_atm = abs(strike_index - atm_index)
+            dist = abs(strike_idx - atm_idx)
 
             if option_type == 'CE':
-                if 'CE' in item and strike >= current_price:  # OTM or ATM CE
-                    ce_data = item['CE']
-                    candidate_strikes.append({
-                        'strike': strike,
-                        'distance_from_atm': distance_from_atm,
-                        'is_atm': strike == atm_strike,
-                        'is_near_atm': distance_from_atm <= 1,
-                        'oi': ce_data.get('openInterest', 0),
-                        'coi': ce_data.get('changeinOpenInterest', 0),
-                        'volume': ce_data.get('totalTradedVolume', 0),
-                        'iv': ce_data.get('impliedVolatility', 0),
-                        'delta': ce_data.get('delta', 0),
-                        'gamma': ce_data.get('gamma', 0),
-                        'ltp': ce_data.get('lastPrice', 0),
-                        'change': ce_data.get('change', 0),
-                        'change_percentage': ce_data.get('pChange', 0)
-                    })
-            else:  # PE
-                if 'PE' in item and strike <= current_price:  # OTM or ATM PE
-                    pe_data = item['PE']
-                    candidate_strikes.append({
-                        'strike': strike,
-                        'distance_from_atm': distance_from_atm,
-                        'is_atm': strike == atm_strike,
-                        'is_near_atm': distance_from_atm <= 1,
-                        'oi': pe_data.get('openInterest', 0),
-                        'coi': pe_data.get('changeinOpenInterest', 0),
-                        'volume': pe_data.get('totalTradedVolume', 0),
-                        'iv': pe_data.get('impliedVolatility', 0),
-                        'delta': pe_data.get('delta', 0),
-                        'gamma': pe_data.get('gamma', 0),
-                        'ltp': pe_data.get('lastPrice', 0),
-                        'change': pe_data.get('change', 0),
-                        'change_percentage': pe_data.get('pChange', 0)
-                    })
+                side = r.get('CE')
+                if not side:
+                    continue
+                # consider ATM or OTM CE (strike >= current_price)
+                if strike < math.floor(current_price):
+                    continue
+            else:
+                side = r.get('PE')
+                if not side:
+                    continue
+                # consider ATM or OTM PE (strike <= current_price)
+                if strike > math.ceil(current_price):
+                    continue
 
-        if not candidate_strikes:
+            oi = int(side.get('openInterest', 0) or 0)
+            coi = int(side.get('changeinOpenInterest', 0) or 0)
+            vol = int(side.get('totalTradedVolume', 0) or 0)
+            iv = float(side.get('impliedVolatility', 0) or 0)
+            ltp = float(side.get('lastPrice', 0) or 0)
+            change = float(side.get('change', 0) or 0)
+            pchg = float(side.get('pChange', 0) or 0)
+            delta = side.get('delta', 0)
+            gamma = side.get('gamma', 0)
+
+            candidates.append({
+                'strike': strike,
+                'distance_from_atm': dist,
+                'is_atm': strike == atm,
+                'is_near_atm': dist <= 1,
+                'oi': oi,
+                'coi': coi,
+                'volume': vol,
+                'iv': iv,
+                'ltp': ltp,
+                'change': change,
+                'change_percentage': pchg,
+                'delta': delta,
+                'gamma': gamma
+            })
+
+        if not candidates:
             return None
 
-        # Multi-parameter scoring
-        for candidate in candidate_strikes:
+        # scoring
+        for c in candidates:
             score = 0.0
-
-            # Priority 1: Proximity to ATM (weighted strongly)
-            if candidate['is_atm']:
+            # proximity strong weight
+            if c['is_atm']:
                 score += 60.0
-            elif candidate['is_near_atm']:
+            elif c['is_near_atm']:
                 score += 50.0
             else:
-                score += max(0.0, 40.0 - (candidate['distance_from_atm'] * 5.0))
-
-            # Priority 2: OI and COI (weight)
-            oi_score = min(candidate['oi'] / 10000.0, 5.0)
-            coi_score = (candidate['coi'] / 500.0) if candidate['coi'] else 0.0
-            score += (oi_score * 2.0) + (coi_score * 1.0)  # slightly amplify OI
-
-            # Priority 3: Volume confirmation
-            volume_score = min(candidate['volume'] / 1000.0, 3.0)
-            score += volume_score
-
-            # Priority 4: IV (lower IV slightly preferred for buying)
-            iv_val = candidate.get('iv') or 0.0
-            iv_score = max(0.0, 5.0 - (float(iv_val) / 5.0))
-            score += iv_score
-
-            # Priority 5: Price momentum
-            if candidate.get('change_percentage', 0) > 0:
+                score += max(0.0, 40.0 - (c['distance_from_atm'] * 5.0))
+            # OI/COI
+            score += min(c['oi'] / 10000.0, 5.0) * 2.0
+            score += (c['coi'] / 500.0) if c['coi'] else 0.0
+            # volume
+            score += min(c['volume'] / 1000.0, 3.0)
+            # iv (lower preferred)
+            score += max(0.0, 5.0 - (c['iv'] / 5.0)) if c['iv'] is not None else 0.0
+            # momentum
+            if c['change_percentage'] > 0:
                 score += 2.0
+            c['score'] = round(score, 2)
+            # selection reason
+            c['selection_reason'] = self.get_selection_reason(c)
 
-            candidate['score'] = round(score, 2)
-            candidate['selection_reason'] = self.get_selection_reason(candidate)
-
-        # Select strike with highest score; prefer those with real volume/oi if ties
-        candidate_strikes.sort(key=lambda x: (x['score'], x['volume']), reverse=True)
-        best_strike = candidate_strikes[0]
-        return best_strike
+        # prefer high score then volume
+        candidates.sort(key=lambda x: (x['score'], x['volume']), reverse=True)
+        return candidates[0]
 
     def get_selection_reason(self, candidate):
-        """Generate detailed selection reason"""
+        """Translate candidate metrics into human-readable reasons."""
         reasons = []
         if candidate.get('is_atm'):
             reasons.append("ATM Strike")
@@ -214,320 +236,217 @@ class AdvancedOptionSignalGenerator:
             reasons.append("Near-ATM")
         else:
             reasons.append(f"{candidate.get('distance_from_atm')} steps from ATM")
-
         coi = candidate.get('coi', 0)
         if coi > 0:
             reasons.append("Fresh Long Buildup")
         elif coi < 0:
             reasons.append("Long Unwinding")
-
         if candidate.get('volume', 0) > 1000:
             reasons.append("High Volume")
-
         iv = candidate.get('iv') or 0
         if iv and iv < 20:
             reasons.append("Low IV")
-
         return " | ".join(reasons)
-            def generate_advanced_signal(self, analysis_data):
-        """Generate signals using multiple parameters"""
+
+    def generate_advanced_signal(self, analysis_data):
+        """Combine the metrics into final trading signal and pick strike."""
         if not analysis_data:
             return None
 
-        symbol = analysis_data['symbol']
+        sym = analysis_data['symbol']
         current_price = analysis_data['current_price']
-        atm_strike = analysis_data['atm_strike']
 
-        # Calculate PCR
-        pcr_oi, pcr_volume = self.calculate_pcr(analysis_data['all_data'])
+        pcr_oi, pcr_vol = self.calculate_pcr(analysis_data['all_data'])
 
-        # OI buildup summary in ATM window
-        total_ce_oi = sum(item['CE']['openInterest'] for item in analysis_data['data'] if 'CE' in item)
-        total_pe_oi = sum(item['PE']['openInterest'] for item in analysis_data['data'] if 'PE' in item)
-        oi_ratio = (total_pe_oi / total_ce_oi) if total_ce_oi else 0.0
+        total_ce_oi = sum(int(r.get('CE', {}).get('openInterest', 0) or 0) for r in analysis_data['data'])
+        total_pe_oi = sum(int(r.get('PE', {}).get('openInterest', 0) or 0) for r in analysis_data['data'])
+        oi_ratio = (total_pe_oi / total_ce_oi) if total_ce_oi > 0 else 0.0
 
-        signal = "HOLD"
+        bullish = 0
+        bearish = 0
+
+        # interpret PCR: higher => relatively more put-interest
+        if pcr_oi > 1.5:
+            bullish += 2
+        elif pcr_oi > 1.2:
+            bullish += 1
+        if pcr_oi < 0.6:
+            bearish += 2
+        elif pcr_oi < 0.8:
+            bearish += 1
+        # OI ratio
+        if oi_ratio > 1.3:
+            bullish += 1
+        elif oi_ratio < 0.7:
+            bearish += 1
+
+        # build signal
+        signal = None
         option_type = None
-        strike_data = None
+        strike_choice = None
         reason = ""
 
-        bullish_conditions = 0
-        bearish_conditions = 0
-
-        # PCR conditions (interpreting higher PCR as more put interest)
-        if pcr_oi > 1.5:
-            bullish_conditions += 2
-        elif pcr_oi > 1.2:
-            bullish_conditions += 1
-
-        if pcr_oi < 0.6:
-            bearish_conditions += 2
-        elif pcr_oi < 0.8:
-            bearish_conditions += 1
-
-        # OI ratio conditions
-        if oi_ratio > 1.3:
-            bullish_conditions += 1
-        elif oi_ratio < 0.7:
-            bearish_conditions += 1
-
-        # Final decision
-        if bullish_conditions >= 3:
-            signal = "STRONG BUY"
-            option_type = "CE"
-            strike_data = self.select_optimal_strike(analysis_data, 'CE')
+        if bullish >= 3:
+            signal = "STRONG BUY"; option_type = "CE"
+            strike_choice = self.select_optimal_strike(analysis_data, "CE")
             reason = f"Strong Bullish: PCR({pcr_oi}), OI_Ratio({oi_ratio:.2f})"
-        elif bullish_conditions >= 2:
-            signal = "BUY"
-            option_type = "CE"
-            strike_data = self.select_optimal_strike(analysis_data, 'CE')
+        elif bullish >= 2:
+            signal = "BUY"; option_type = "CE"
+            strike_choice = self.select_optimal_strike(analysis_data, "CE")
             reason = f"Bullish: PCR({pcr_oi}), OI_Ratio({oi_ratio:.2f})"
-        elif bearish_conditions >= 3:
-            signal = "STRONG SELL"
-            option_type = "PE"
-            strike_data = self.select_optimal_strike(analysis_data, 'PE')
+        elif bearish >= 3:
+            signal = "STRONG SELL"; option_type = "PE"
+            strike_choice = self.select_optimal_strike(analysis_data, "PE")
             reason = f"Strong Bearish: PCR({pcr_oi}), OI_Ratio({oi_ratio:.2f})"
-        elif bearish_conditions >= 2:
-            signal = "SELL"
-            option_type = "PE"
-            strike_data = self.select_optimal_strike(analysis_data, 'PE')
+        elif bearish >= 2:
+            signal = "SELL"; option_type = "PE"
+            strike_choice = self.select_optimal_strike(analysis_data, "PE")
             reason = f"Bearish: PCR({pcr_oi}), OI_Ratio({oi_ratio:.2f})"
-        else:
-            return None  # No clear signal
 
-        if strike_data:
-            return {
-                'symbol': symbol,
-                'signal': signal,
-                'option_type': option_type,
-                'strike_price': strike_data['strike'],
-                'current_price': current_price,
-                'atm_strike': atm_strike,
-                'distance_from_atm': strike_data['distance_from_atm'],
-                'option_ltp': strike_data['ltp'],
-                'option_change': strike_data['change'],
-                'option_change_percentage': strike_data['change_percentage'],
-                'oi': strike_data['oi'],
-                'coi': strike_data['coi'],
-                'volume': strike_data['volume'],
-                'iv': strike_data['iv'],
-                'delta': strike_data['delta'],
-                'gamma': strike_data['gamma'],
-                'pcr_oi': pcr_oi,
-                'pcr_volume': pcr_volume,
-                'oi_ratio': round(oi_ratio, 2),
-                'strike_score': strike_data['score'],
-                'selection_reason': strike_data['selection_reason'],
-                'signal_reason': reason,
-                'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            }
+        if not signal or not strike_choice:
+            return None
 
-        return None
+        return {
+            'symbol': sym,
+            'signal': signal,
+            'option_type': option_type,
+            'strike_price': strike_choice['strike'],
+            'current_price': current_price,
+            'atm_strike': analysis_data['atm_strike'],
+            'distance_from_atm': strike_choice['distance_from_atm'],
+            'option_ltp': strike_choice['ltp'],
+            'option_change': strike_choice['change'],
+            'option_change_percentage': strike_choice['change_percentage'],
+            'oi': strike_choice['oi'],
+            'coi': strike_choice['coi'],
+            'volume': strike_choice['volume'],
+            'iv': strike_choice['iv'],
+            'delta': strike_choice.get('delta', 0),
+            'gamma': strike_choice.get('gamma', 0),
+            'pcr_oi': pcr_oi,
+            'pcr_volume': pcr_vol,
+            'oi_ratio': round(oi_ratio, 2),
+            'strike_score': strike_choice['score'],
+            'selection_reason': strike_choice['selection_reason'],
+            'signal_reason': reason,
+            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
 
     def run_complete_analysis(self):
-        """Run complete analysis with all parameters"""
-        print("🎯 RUNNING COMPLETE OPTION CHAIN ANALYSIS...")
-        print("📊 Parameters: OI, COI, Price, Change, IV, Delta, Gamma, ATM±5")
-        print("=" * 80)
-
+        """Main loop: fetch, analyze and return signals + market overview."""
+        print(f"{PRINT_PREFIX} 🎯 RUNNING COMPLETE OPTION CHAIN ANALYSIS...")
         all_signals = []
         market_data = []
 
-        for symbol in self.symbols:
-            print(f"🔍 Analyzing {symbol} (ATM ±5 strikes)...")
-            data = self.fetch_option_chain(symbol)
+        for sym in self.symbols:
+            print(f"{PRINT_PREFIX} 🔍 Analyzing {sym} ...")
+            data = self.fetch_option_chain(sym)
+            if not data:
+                print(f"{PRINT_PREFIX} ❌ No data for {sym}")
+                time_module.sleep(1)
+                continue
 
-            if data:
-                analysis_data = self.analyze_atm_strikes(data, symbol)
-                if analysis_data:
-                    strikes = analysis_data['strikes_analyzed']
-                    print(f"   🎯 ATM: {analysis_data['atm_strike']}, Range: {strikes[0]} to {strikes[-1]}")
-                    signal = self.generate_advanced_signal(analysis_data)
-                    if signal:
-                        all_signals.append(signal)
-                        print(f"   ✅ {signal['signal']} {signal['option_type']} at {signal['strike_price']}")
-                        print(f"   📍 {signal['selection_reason']}")
-                        print(f"   💰 LTP: {signal['option_ltp']}, OI: {signal['oi']:,}, COI: {signal['coi']:+,}")
-                    # store market overview
-                    market_data.append({
-                        'symbol': symbol,
-                        'current_price': analysis_data['current_price'],
-                        'atm_strike': analysis_data['atm_strike'],
-                        'strikes_analyzed': len(strikes),
-                        # pcr values saved in signal when exists
-                        'pcr_oi': signal['pcr_oi'] if signal else 0,
-                        'pcr_volume': signal['pcr_volume'] if signal else 0,
-                        'oi_ratio': signal['oi_ratio'] if signal else 0,
-                        'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    })
-                else:
-                    print(f"   ❌ No analysis data for {symbol}")
+            analysis = self.analyze_atm_strikes(data, sym)
+            if not analysis:
+                print(f"{PRINT_PREFIX} ❌ No ATM analysis for {sym}")
+                time_module.sleep(1)
+                continue
+
+            print(f"{PRINT_PREFIX}   ATM {analysis['atm_strike']}, Range {analysis['strikes_analyzed'][0]} - {analysis['strikes_analyzed'][-1]}")
+            signal = self.generate_advanced_signal(analysis)
+            if signal:
+                all_signals.append(signal)
+                print(f"{PRINT_PREFIX}   ✅ {signal['signal']} {signal['option_type']} {signal['strike_price']}")
+                print(f"{PRINT_PREFIX}      Reason: {signal['selection_reason']}")
             else:
-                print(f"   ❌ Failed to fetch data for {symbol}")
+                print(f"{PRINT_PREFIX}   ⏸ No strong signal for {sym}")
 
-            print("-" * 50)
+            # market overview entry
+            market_data.append({
+                'symbol': sym,
+                'current_price': analysis['current_price'],
+                'atm_strike': analysis['atm_strike'],
+                'strikes_analyzed': len(analysis['strikes_analyzed']),
+                'pcr_oi': None,
+                'pcr_volume': None,
+                'oi_ratio': None,
+                'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            })
+
             time_module.sleep(1)
 
-        print(f"📊 Analysis Complete: {len(all_signals)} signals generated")
+        print(f"{PRINT_PREFIX} 📊 Analysis complete, {len(all_signals)} signals found")
         return all_signals, market_data
-        def generate_advanced_dashboard(signals, market_data, out_path="index.html"):
-    """Generate comprehensive trading dashboard HTML and save to out_path"""
-    html = f"""<!DOCTYPE html>
-<html>
-<head>
-    <title>Advanced NSE Option Signals - Complete Analysis</title>
-    <meta http-equiv="refresh" content="300">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+
+
+# -------------------------
+# Dashboard & main runner
+# -------------------------
+def generate_advanced_dashboard(signals, market_data, out_path="docs/index.html"):
+    """Generate a simple HTML dashboard and save to docs/index.html"""
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    html = f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Advanced NSE Option Signals</title>
     <style>
-        body {{ font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }}
-        .container {{ max-width: 1200px; margin: 0 auto; }}
-        .header {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; border-radius: 10px; }}
-        .signal-card {{ background: white; padding: 12px; margin: 10px 0; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.08); }}
-        .strong-buy {{ border-left: 5px solid #28a745; }}
-        .buy {{ border-left: 5px solid #17a2b8; }}
-        table {{ width: 100%; border-collapse: collapse; background: white; }}
-        th, td {{ padding: 10px; text-align: left; border-bottom: 1px solid #ddd; }}
-        th {{ background-color: #f8f9fa; }}
-        .param-badge {{ background: #e9ecef; padding: 4px 8px; border-radius: 10px; font-size: 12px; margin: 2px; }}
-        .positive {{ color: #28a745; }}
-        .negative {{ color: #dc3545; }}
+      body{{font-family:Arial,Helvetica,sans-serif;background:#f5f7fa;color:#111;padding:16px}}
+      .card{{background:#fff;padding:12px;border-radius:8px;box-shadow:0 2px 6px rgba(0,0,0,0.08);margin-bottom:12px}}
+      table{{width:100%;border-collapse:collapse}}
+      th,td{{padding:8px;border-bottom:1px solid #eee;text-align:left}}
+      th{{background:#fafafa}}
     </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <h1>🎯 Advanced NSE Option Signals</h1>
-            <p>Complete Analysis: OI, COI, Price, IV, Delta, Gamma, ATM ±5 Strikes</p>
-            <p><strong>Last Updated:</strong> {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</p>
-        </div>
-"""
-
-    if signals:
-        html += """
-        <h2>🛰️ Active Trading Signals</h2>
-        <table>
-            <thead>
-                <tr>
-                    <th>Symbol</th><th>Signal</th><th>Option</th><th>Strike</th><th>ATM</th>
-                    <th>LTP</th><th>Change</th><th>OI</th><th>COI</th><th>IV</th>
-                    <th>Delta</th><th>PCR</th><th>Score</th><th>Reason</th>
-                </tr>
-            </thead>
-            <tbody>
-        """
-        for s in signals:
-            signal_class = "strong-buy" if "STRONG" in s['signal'] else "buy"
-            change_class = "positive" if s.get('option_change', 0) > 0 else "negative"
-            coi_class = "positive" if s.get('coi', 0) > 0 else "negative"
-            html += f"""
-                <tr class="{signal_class}">
-                    <td><strong>{s['symbol']}</strong></td>
-                    <td><strong>{s['signal']}</strong></td>
-                    <td>{s['option_type']}</td>
-                    <td>{s['strike_price']}</td>
-                    <td>{s['atm_strike']}</td>
-                    <td>{s['option_ltp']}</td>
-                    <td class="{change_class}">{s['option_change']:+.2f}</td>
-                    <td>{s['oi']:,}</td>
-                    <td class="{coi_class}">{s['coi']:+,}</td>
-                    <td>{s['iv']}</td>
-                    <td>{s['delta']}</td>
-                    <td>{s['pcr_oi']}</td>
-                    <td>{s['strike_score']}</td>
-                    <td><small>{s['selection_reason']}</small></td>
-                </tr>
-            """
-        html += """
-            </tbody>
-        </table>
-        """
-    else:
-        html += """
-        <div class="signal-card">
-            <h3>⏸️ No Strong Signals Detected</h3>
-            <p>Market is neutral. Monitoring ATM ±5 strikes...</p>
-        </div>
-        """
-
-    if market_data:
-        html += """
-        <h2>📊 Market Overview (ATM ±5 Analysis)</h2>
-        <table>
-            <thead><tr><th>Symbol</th><th>Current Price</th><th>ATM</th><th>Strikes</th><th>PCR OI</th><th>OI Ratio</th><th>Signal Strength</th></tr></thead>
-            <tbody>
-        """
-        for d in market_data:
-            pcr_oi = d.get('pcr_oi', 0)
-            if pcr_oi > 1.5:
-                strength = "🟢 Very Bullish"
-            elif pcr_oi > 1.2:
-                strength = "🟡 Bullish"
-            elif pcr_oi < 0.6:
-                strength = "🔴 Very Bearish"
-            elif pcr_oi < 0.8:
-                strength = "🟠 Bearish"
-            else:
-                strength = "⚪ Neutral"
-            html += f"""
-                <tr>
-                    <td>{d['symbol']}</td>
-                    <td>{d['current_price']}</td>
-                    <td>{d['atm_strike']}</td>
-                    <td>{d['strikes_analyzed']} strikes</td>
-                    <td>{d.get('pcr_oi',0)}</td>
-                    <td>{d.get('oi_ratio',0)}</td>
-                    <td>{strength}</td>
-                </tr>
-            """
-        html += "</tbody></table>"
-
-    html += """
-        </div>
-    </body>
-    </html>
+    </head><body>
+    <h1>Advanced NSE Option Signals</h1>
+    <p>Last Updated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</p>
     """
 
-    # save to file
+    if signals:
+        html += "<h2>Signals</h2><table><thead><tr><th>Symbol</th><th>Signal</th><th>Opt</th><th>Strike</th><th>ATM</th><th>LTP</th><th>OI</th><th>COI</th><th>IV</th><th>Score</th></tr></thead><tbody>"
+        for s in signals:
+            html += f"<tr><td>{s['symbol']}</td><td>{s['signal']}</td><td>{s['option_type']}</td><td>{s['strike_price']}</td><td>{s['atm_strike']}</td><td>{s['option_ltp']}</td><td>{s['oi']}</td><td>{s['coi']}</td><td>{s['iv']}</td><td>{s['strike_score']}</td></tr>"
+        html += "</tbody></table>"
+    else:
+        html += "<div class='card'><strong>No strong signals detected</strong></div>"
+
+    if market_data:
+        html += "<h2>Market Overview</h2><table><thead><tr><th>Symbol</th><th>Price</th><th>ATM</th><th>Strikes</th><th>Updated</th></tr></thead><tbody>"
+        for m in market_data:
+            html += f"<tr><td>{m['symbol']}</td><td>{m['current_price']}</td><td>{m['atm_strike']}</td><td>{m['strikes_analyzed']}</td><td>{m['timestamp']}</td></tr>"
+        html += "</tbody></table>"
+
+    html += "</body></html>"
+
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(html)
-    print(f"✅ Advanced dashboard generated: {out_path}")
+    print(f"{PRINT_PREFIX} ✅ Dashboard written to {out_path}")
 
 
 def main():
-    print("=" * 70)
-    print("🛰️ ADVANCED NSE OPTION SIGNALS - COMPLETE ANALYSIS (RUN)")
-    print("=" * 70)
-
-    generator = AdvancedOptionSignalGenerator()
-    signals, market_data = generator.run_complete_analysis()
+    print(f"{PRINT_PREFIX} Starting analysis at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    gen = AdvancedOptionSignalGenerator()
+    signals, market_data = gen.run_complete_analysis()
 
     # Save CSVs
+    os.makedirs("output", exist_ok=True)
     if signals:
-        df_signals = pd.DataFrame(signals)
-        df_signals.to_csv("option_signals.csv", index=False)
-        print(f"✅ Detailed signals saved: {len(signals)} signals")
+        pd.DataFrame(signals).to_csv("output/option_signals.csv", index=False)
+        print(f"{PRINT_PREFIX} ✅ Signals saved: output/option_signals.csv")
     else:
-        empty_df = pd.DataFrame(columns=[
-            'symbol', 'signal', 'option_type', 'strike_price', 'current_price',
-            'atm_strike', 'distance_from_atm', 'option_ltp', 'option_change',
-            'option_change_percentage', 'oi', 'coi', 'volume', 'iv', 'delta',
-            'gamma', 'pcr_oi', 'pcr_volume', 'oi_ratio', 'strike_score',
-            'selection_reason', 'signal_reason', 'timestamp'
-        ])
-        empty_df.to_csv("option_signals.csv", index=False)
-        print("❔ No strong signals - empty CSV written")
+        pd.DataFrame(columns=[
+            'symbol','signal','option_type','strike_price','current_price','atm_strike',
+            'distance_from_atm','option_ltp','option_change','option_change_percentage',
+            'oi','coi','volume','iv','delta','gamma','pcr_oi','pcr_volume',
+            'oi_ratio','strike_score','selection_reason','signal_reason','timestamp'
+        ]).to_csv("output/option_signals.csv", index=False)
+        print(f"{PRINT_PREFIX} ℹ️ No signals -> empty CSV written")
 
     if market_data:
-        df_market = pd.DataFrame(market_data)
-        df_market.to_csv("detailed_option_data.csv", index=False)
-        print(f"✅ Market data saved: {len(market_data)} symbols")
+        pd.DataFrame(market_data).to_csv("output/detailed_option_data.csv", index=False)
+        print(f"{PRINT_PREFIX} ✅ Market data saved: output/detailed_option_data.csv")
 
-    # Generate dashboard HTML saved to docs/index.html for GitHub Pages
-    # ensure docs folder exists
-    os.makedirs("docs", exist_ok=True)
+    # Write docs/index.html for GitHub Pages
     generate_advanced_dashboard(signals, market_data, out_path="docs/index.html")
-
+    print(f"{PRINT_PREFIX} Finished at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
 if __name__ == "__main__":
     main()
-    
+            
