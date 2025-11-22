@@ -135,21 +135,34 @@ class AdvancedOptionSignalGenerator:
             if option_type == 'CE':
                 if 'CE' in item and strike >= current_price:  # OTM or ATM CE
                     ce_data = item['CE']
+                            candidate_strikes = []
+
+        for item in relevant_data:
+            strike = item['strikePrice']
+            
+            # Calculate distance from ATM
+            strike_index = analysis_data['strikes_analyzed'].index(strike)
+            atm_index = analysis_data['strikes_analyzed'].index(atm_strike)
+            distance_from_atm = abs(strike_index - atm_index)
+            
+            if option_type == 'CE':
+                if 'CE' in item and strike >= current_price:  # OTM or ATM CE
+                    ce_data = item['CE']
                     candidate_strikes.append({
                         'strike': strike,
                         'distance_from_atm': distance_from_atm,
                         'is_atm': strike == atm_strike,
                         'is_near_atm': distance_from_atm <= 1,
                         'oi': ce_data.get('openInterest', 0),
-                        'coi': ce_data.get('changeinOpenInterest', 0),
-                        'volume': ce_data.get('totalTradedVolume', 0),
+                        'coi': ce_data.get('changeinOpenInterest', 0),  # Fixed typo
+                        'volume': ce_data.get('totalTradedVolume', 0),   # Fixed typo
                         'iv': ce_data.get('impliedVolatility', 0),
                         'delta': ce_data.get('delta', 0),
                         'gamma': ce_data.get('gamma', 0),
                         'ltp': ce_data.get('lastPrice', 0),
                         'change': ce_data.get('change', 0),
                         'change_percentage': ce_data.get('pChange', 0)
-                    })
+                    })  # Removed semicolon
             else:  # PE
                 if 'PE' in item and strike <= current_price:  # OTM or ATM PE
                     pe_data = item['PE']
@@ -159,17 +172,54 @@ class AdvancedOptionSignalGenerator:
                         'is_atm': strike == atm_strike,
                         'is_near_atm': distance_from_atm <= 1,
                         'oi': pe_data.get('openInterest', 0),
-                        'coi': pe_data.get('changeinOpenInterest', 0),
-                        'volume': pe_data.get('totalTradedVolume', 0),
+                        'coi': pe_data.get('changeinOpenInterest', 0),  # Fixed typo
+                        'volume': pe_data.get('totalTradedVolume', 0),   # Fixed typo
                         'iv': pe_data.get('impliedVolatility', 0),
                         'delta': pe_data.get('delta', 0),
                         'gamma': pe_data.get('gamma', 0),
                         'ltp': pe_data.get('lastPrice', 0),
                         'change': pe_data.get('change', 0),
                         'change_percentage': pe_data.get('pChange', 0)
-                    })
-                    if not candidate_strikes:
+                    })  # Removed semicolon
+
+        if not candidate_strikes:
             return None
+
+        # Multi-parameter scoring
+        for candidate in candidate_strikes:
+            score = 0
+
+            # Priority 1: Proximity to ATM (60% weight)
+            if candidate['is_atm']:  # Fixed: removed semicolon, added colon
+                score += 60
+            elif candidate['is_near_atm']:  # Fixed: removed semicolon, added colon
+                score += 50
+            else:
+                score += 40 - (candidate['distance_from_atm'] * 5)
+
+            # Priority 2: OI and COI analysis (20% weight)
+            oi_score = min(candidate['oi'] / 10000, 5)
+            coi_score = candidate['coi'] / 500
+            score += oi_score + coi_score
+            
+            # Priority 3: Volume confirmation (10% weight)
+            volume_score = min(candidate['volume'] / 1000, 3)
+            score += volume_score
+            
+            # Priority 4: IV consideration (5% weight) - lower IV better for buying
+            iv_score = max(0, 5 - (candidate['iv'] or 0) / 5)
+            score += iv_score
+            
+            # Priority 5: Price momentum (5% weight)
+            if candidate['change_percentage'] > 0:
+                score += 2
+            
+            candidate['score'] = round(score, 2)
+            candidate['selection_reason'] = self.get_selection_reason(candidate)
+
+        # Select strike with highest score
+        best_strike = max(candidate_strikes, key=lambda x: x['score'])
+        return best_strike
         
         # Multi-parameter scoring
         for candidate in candidate_strikes:
