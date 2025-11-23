@@ -3,39 +3,42 @@ name: Update Option Signals
 on:
   push:
     branches: [ main ]
+
   schedule:
-    - cron: '*/15 9-16 * * 1-5'  # Run every 15 minutes from 9 AM to 4 PM, Mon-Fri
+    - cron: "*/15 9-16 * * 1-5"   # Every 15 mins, 9AM–4PM, Mon-Fri (IST)
 
 jobs:
   update-signals:
     runs-on: ubuntu-latest
-    
+
     steps:
     - name: Checkout repository
       uses: actions/checkout@v3
-      
+
     - name: Set up Python
       uses: actions/setup-python@v4
       with:
-        python-version: '3.9'
-        
+        python-version: "3.9"
+
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
         pip install pandas requests numpy
-        
-    - name: Create signals directory
-      run: |
-        mkdir -p signals
-        
-    - name: Run option signals analysis
+
+    - name: Run Option Signals Script
       run: |
         python option_signals.py
-        
-    - name: Commit and push changes
+
+    - name: Commit & Push Updated Dashboard + Signals
       run: |
         git config --local user.email "action@github.com"
         git config --local user.name "GitHub Action"
+
+        # Add both dashboard + signals
+        git add docs/dashboard.json
         git add signals/
-        git diff --staged --quiet || git commit -m "Update option signals [skip ci]"
+
+        # Always commit if any change exists
+        git diff --staged --quiet || git commit -m "Update dashboard $(date)"
         git push
+        
