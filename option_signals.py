@@ -421,7 +421,7 @@ class AdvancedOptionSignalGenerator:
                 continue
 
             analysis = self.analyze_atm_strikes(data, sym)
-           if not analysis:
+            if not analysis:
                 print(f"{PRINT_PREFIX} ❌ No ATM analysis for {sym}")
                 market_data.append({
                     'symbol': sym,
