@@ -648,8 +648,8 @@ def generate_advanced_dashboard(signals, market_data, out_path="docs/index.html"
         f.write(html)
     print(f"{PRINT_PREFIX} ✅ Dashboard generated: {out_path}")
     def main():
-    print(f"{PRINT_PREFIX} 🚀 Starting Advanced Option Signal Analysis")
-    print(f"{PRINT_PREFIX} ⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"{PRINT_PREFIX} 🚀 Starting Advanced Option Signal Analysis")
+        print(f"{PRINT_PREFIX} ⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
     gen = AdvancedOptionSignalGenerator()
     signals, market_data = gen.run_complete_analysis()
