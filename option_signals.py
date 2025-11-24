@@ -1,389 +1,433 @@
+#!/usr/bin/env python3
+"""
+option_signals.py
+Final, fully working version.
+Generates:
+ - docs/dashboard.json
+ - signals/latest.json
+ - option_signals.csv
+ - detailed_option_data.csv
+"""
+
 import requests
-import pandas as pd
-import numpy as np
+import json
+import csv
+import os
+import math
 from datetime import datetime
 import time as time_module
-import json
-import os
 
-print("🚀 ADVANCED NSE OPTION SIGNALS - COMPLETE ANALYSIS")
+# -----------------------
+# Config
+# -----------------------
+SYMBOLS = [
+    "NIFTY", "BANKNIFTY",
+    "RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK",
+    "KOTAKBANK", "HDFC", "BHARTIARTL", "ITC", "SBIN"
+]
+
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+
+LIQUIDITY_THRESHOLD = 200   # min volume requirement
+
+def now_str(fmt="%Y-%m-%d %H:%M:%S"):
+    return datetime.now().strftime(fmt)
+
+# --------------------------------------------
+# Helper: safe dictionary read
+# --------------------------------------------
+def safe_get(d, *keys, default=None):
+    cur = d
+    try:
+        for k in keys:
+            cur = cur[k]
+        return default if cur is None else cur
+    except Exception:
+        return default
+
+# ==================================================================
+# ===============   MAIN ENGINE CLASS   =============================
+# ==================================================================
 
 class AdvancedOptionSignalGenerator:
-    def __init__(self):
-        self.symbols = [
-            "NIFTY", "BANKNIFTY",
-            "RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK",
-            "KOTAKBANK", "HDFC", "BHARTIARTL", "ITC", "SBIN"
-        ]
+    def __init__(self, symbols=SYMBOLS):
+        self.symbols = symbols
+        self.session = requests.Session()
+        self.session.headers.update({
+            "User-Agent": USER_AGENT,
+            "Accept": "*/*"
+        })
 
-    # ------------------ FETCH OPTION CHAIN ------------------
+    # ----------------------------------------------------------------
+    # Fetch Option Chain
+    # ----------------------------------------------------------------
     def fetch_option_chain(self, symbol):
         try:
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
-            }
+            self.session.get("https://www.nseindia.com", timeout=5)
+        except:
+            pass
 
-            session = requests.Session()
-            session.get("https://www.nseindia.com", headers=headers, timeout=10)
+        if symbol in ("NIFTY", "BANKNIFTY"):
+            url = f"https://www.nseindia.com/api/option-chain-indices?symbol={symbol}"
+        else:
+            url = f"https://www.nseindia.com/api/option-chain-equities?symbol={symbol}"
 
-            if symbol in ['NIFTY', 'BANKNIFTY']:
-                url = f"https://www.nseindia.com/api/option-chain-indices?symbol={symbol}"
-            else:
-                url = f"https://www.nseindia.com/api/option-chain-equities?symbol={symbol}"
-
-            response = session.get(url, headers=headers, timeout=10)
-
-            if response.status_code == 200:
-                return response.json()
-            else:
-                print(f"❌ Failed to fetch {symbol}: Status {response.status_code}")
-                return None
-
+        try:
+            r = self.session.get(url, timeout=12)
+            if r.status_code == 200:
+                return r.json()
+            print(f"❌ HTTP {r.status_code} for {symbol}")
+            return None
         except Exception as e:
-            print(f"❌ Error: {symbol} => {e}")
+            print(f"❌ Fetch error for {symbol}: {e}")
             return None
 
-    # ------------------ ANALYZE ATM ±5 ------------------
-    def analyze_atm_strikes(self, data, symbol):
-        if not data or 'records' not in data:
+    # ----------------------------------------------------------------
+    # ATM ±5 Analysis
+    # ----------------------------------------------------------------
+    def analyze_atm_strikes(self, raw):
+        if not raw or "records" not in raw:
             return None
 
-        records = data['records']
-        current_price = records['underlyingValue']
-        expiry = records['expiryDates'][0]
+        records = raw["records"]
+        underlying = records.get("underlyingValue")
+        expiry_list = records.get("expiryDates", [])
+        all_rows = records.get("data", []) or []
 
-        option_data = [
-            item for item in records['data']
-            if item.get('expiryDate') == expiry
-        ]
-
-        if not option_data:
+        if underlying is None or not expiry_list or not all_rows:
             return None
 
-        strikes = sorted([item['strikePrice'] for item in option_data])
-        atm = min(strikes, key=lambda x: abs(x - current_price))
+        expiry = expiry_list[0]
+        rows_for_expiry = [r for r in all_rows if r.get("expiryDate") == expiry]
 
+        if not rows_for_expiry:
+            return None
+
+        strikes = sorted({int(r.get("strikePrice", 0)) for r in rows_for_expiry})
+        if not strikes:
+            return None
+
+        atm = min(strikes, key=lambda x: abs(x - float(underlying)))
         atm_index = strikes.index(atm)
+
         start = max(0, atm_index - 5)
         end = min(len(strikes), atm_index + 6)
-
         selected_strikes = strikes[start:end]
 
-        filtered = [
-            row for row in option_data if row["strikePrice"] in selected_strikes
-        ]
+        filtered_rows = [r for r in rows_for_expiry if int(r.get("strikePrice", 0)) in selected_strikes]
 
         return {
-            "symbol": symbol,
-            "current_price": current_price,
+            "symbol": raw.get("records", {}).get("underlyingValue", None),
+            "underlying": float(underlying),
             "atm_strike": atm,
             "expiry": expiry,
             "strikes_analyzed": selected_strikes,
-            "data": filtered,
-            "all_data": option_data
+            "strike_rows": filtered_rows,
+            "all_rows": rows_for_expiry
         }
 
-    # ------------------ PCR ------------------
-    def calculate_pcr(self, data):
-        ce_oi = pe_oi = ce_vol = pe_vol = 0
-
-        for row in data:
-            if "CE" in row:
-                ce_oi += row["CE"].get("openInterest", 0)
-                ce_vol += row["CE"].get("totalTradedVolume", 0)
-            if "PE" in row:
-                pe_oi += row["PE"].get("openInterest", 0)
-                pe_vol += row["PE"].get("totalTradedVolume", 0)
-
-        pcr_oi = pe_oi / ce_oi if ce_oi > 0 else 0
-        pcr_vol = pe_vol / ce_vol if ce_vol > 0 else 0
-
-        return round(pcr_oi, 2), round(pcr_vol, 2)
-            # ------------------ STRIKE-WISE ANALYSIS ------------------
+    # ----------------------------------------------------------------
+    # Build strike-level summary
+    # ----------------------------------------------------------------
     def analyze_strike_strength(self, strike_rows):
-        result = []
+        out = []
+        for r in strike_rows:
+            strike = int(r.get("strikePrice", 0))
+            ce = r.get("CE") or {}
+            pe = r.get("PE") or {}
 
-        for row in strike_rows:
-            strike = row["strikePrice"]
+            ce_oi = int(ce.get("openInterest") or 0)
+            pe_oi = int(pe.get("openInterest") or 0)
+            ce_chg = int(ce.get("changeinOpenInterest") or 0)
+            pe_chg = int(pe.get("changeinOpenInterest") or 0)
+            ce_vol = int(ce.get("totalTradedVolume") or 0)
+            pe_vol = int(pe.get("totalTradedVolume") or 0)
+            ce_iv = float(ce.get("impliedVolatility") or 0)
+            pe_iv = float(pe.get("impliedVolatility") or 0)
+            ce_ltp = float(ce.get("lastPrice") or 0)
+            pe_ltp = float(pe.get("lastPrice") or 0)
 
-            ce = row.get("CE", {})
-            pe = row.get("PE", {})
-
-            ce_oi = ce.get("openInterest", 0)
-            pe_oi = pe.get("openInterest", 0)
-            ce_chg = ce.get("changeinOpenInterest", 0)
-            pe_chg = pe.get("changeinOpenInterest", 0)
-            ce_vol = ce.get("totalTradedVolume", 0)
-            pe_vol = pe.get("totalTradedVolume", 0)
-
-            result.append({
+            out.append({
                 "strike": strike,
-
                 "ce_oi": ce_oi,
                 "pe_oi": pe_oi,
-
                 "ce_chg": ce_chg,
                 "pe_chg": pe_chg,
-
                 "ce_vol": ce_vol,
                 "pe_vol": pe_vol,
-
+                "ce_iv": ce_iv,
+                "pe_iv": pe_iv,
+                "ce_ltp": ce_ltp,
+                "pe_ltp": pe_ltp,
                 "ce_strength": ce_oi + ce_chg + ce_vol,
                 "pe_strength": pe_oi + pe_chg + pe_vol
             })
+        return out
 
-        return result
-            # ------------------ SIGNAL ENGINE ------------------
-    def generate_signal_from_analysis(self, analysis_data,
-                                      pcr_thresholds=(1.5, 1.2),
-                                      oi_ratio_thresholds=(1.3, 0.7)):
-        """
-        Generate a BUY/SELL/STRONG signal from analysis_data (ATM ±5).
-        - pcr_thresholds: (strong, weak) e.g. (1.5, 1.2)
-        - oi_ratio_thresholds: (bull_strong, bear_strong) e.g. (1.3, 0.7)
-        Returns: dict with detailed signal or None
-        """
-        if not analysis_data:
-            return None
+    # ----------------------------------------------------------------
+    # Select best CE/PE strike
+    # ----------------------------------------------------------------
+    def select_optimal_strike(self, analysis_data, option_side):
+        rows = analysis_data.get("strike_rows", [])
+        strike_info = self.analyze_strike_strength(rows)
+        strikes_list = analysis_data["strikes_analyzed"]
+        atm = analysis_data["atm_strike"]
 
-        # compute PCR and OI summary
-        pcr_oi, pcr_vol = self.calculate_pcr(analysis_data.get('all_data', []))
+        try:
+            atm_index = strikes_list.index(atm)
+        except:
+            atm_index = 0
 
-        # compute OI sums in ATM window
-        total_ce_oi = sum(int(r.get('CE', {}).get('openInterest', 0) or 0)
-                          for r in analysis_data.get('data', []))
-        total_pe_oi = sum(int(r.get('PE', {}).get('openInterest', 0) or 0)
-                          for r in analysis_data.get('data', []))
+        candidates = []
 
-        oi_ratio = (total_pe_oi / total_ce_oi) if total_ce_oi > 0 else 0.0
+        for info in strike_info:
+            strike = info["strike"]
+            try:
+                idx = strikes_list.index(strike)
+            except:
+                idx = 0
 
-        # scoring counters
-        bullish_points = 0
-        bearish_points = 0
+            dist = abs(idx - atm_index)
 
-        # PCR interpretation (higher PCR -> relatively more put interest)
-        strong_pcr, weak_pcr = pcr_thresholds
-        if pcr_oi >= strong_pcr:
-            bullish_points += 2
-        elif pcr_oi >= weak_pcr:
-            bullish_points += 1
+            if option_side == "CE":
+                if strike < analysis_data["underlying"]:
+                    continue
+                score = (60 if dist == 0 else 50 if dist == 1 else max(0, 40 - dist*5))
+                score += info["ce_oi"] / 10000
+                score += info["ce_chg"] / 500
+                score += info["ce_vol"] / 1000
+                score += max(0, 5 - info["ce_iv"] / 5)
+                score += 1 if info["ce_ltp"] > 0 else 0
 
-        if pcr_oi <= (1.0 / strong_pcr):  # e.g. very low PCR -> bearish
-            bearish_points += 2
-        elif pcr_oi <= (1.0 / weak_pcr):
-            bearish_points += 1
-
-        # OI ratio interpretation (pe_oi / ce_oi)
-        bull_oi_thr, bear_oi_thr = oi_ratio_thresholds
-        if oi_ratio >= bull_oi_thr:
-            bullish_points += 1
-        elif oi_ratio <= bear_oi_thr:
-            bearish_points += 1
-
-        # Final decision mapping
-        signal_label = None
-        option_side = None
-        chosen_strike = None
-        reason = []
-
-        # Decide signal strength
-        if bullish_points >= 3:
-            signal_label = "STRONG BUY"
-            option_side = "CE"
-            reason.append(f"PCR={pcr_oi} (bullish), OI_ratio={oi_ratio:.2f}")
-        elif bullish_points >= 2:
-            signal_label = "BUY"
-            option_side = "CE"
-            reason.append(f"PCR={pcr_oi} (mild bullish), OI_ratio={oi_ratio:.2f}")
-        elif bearish_points >= 3:
-            signal_label = "STRONG SELL"
-            option_side = "PE"
-            reason.append(f"PCR={pcr_oi} (bearish), OI_ratio={oi_ratio:.2f}")
-        elif bearish_points >= 2:
-            signal_label = "SELL"
-            option_side = "PE"
-            reason.append(f"PCR={pcr_oi} (mild bearish), OI_ratio={oi_ratio:.2f}")
-        else:
-            # No clear directional signal
-            return None
-
-        # If we reached here, select optimal strike on chosen side
-        chosen_strike = self.select_optimal_strike(analysis_data, option_side)
-        if not chosen_strike:
-            # fallback: if no candidate on preferred side, try opposite side once
-            alt_side = "PE" if option_side == "CE" else "CE"
-            chosen_strike = self.select_optimal_strike(analysis_data, alt_side)
-            if chosen_strike:
-                reason.append(f"Fallback to {alt_side} due to liquidity")
-                option_side = alt_side
+                candidates.append({
+                    "strike": strike,
+                    "side": "CE",
+                    "score": round(score, 2),
+                    "oi": info["ce_oi"],
+                    "coi": info["ce_chg"],
+                    "volume": info["ce_vol"],
+                    "iv": info["ce_iv"],
+                    "ltp": info["ce_ltp"],
+                    "distance_from_atm": dist
+                })
             else:
-                # cannot choose any strike => abort
-                return None
+                if strike > analysis_data["underlying"]:
+                    continue
+                score = (60 if dist == 0 else 50 if dist == 1 else max(0, 40 - dist*5))
+                score += info["pe_oi"] / 10000
+                score += info["pe_chg"] / 500
+                score += info["pe_vol"] / 1000
+                score += max(0, 5 - info["pe_iv"] / 5)
+                score += 1 if info["pe_ltp"] > 0 else 0
 
-        # Build result
-        result = {
-            "symbol": analysis_data.get("symbol"),
-            "signal": signal_label,
-            "option_type": option_side,
-            "strike_price": chosen_strike.get("strike"),
-            "atm_strike": analysis_data.get("atm_strike"),
-            "distance_from_atm": chosen_strike.get("distance_from_atm"),
-            "option_ltp": chosen_strike.get("ltp"),
-            "option_change": chosen_strike.get("change"),
-            "oi": chosen_strike.get("oi"),
-            "coi": chosen_strike.get("coi"),
-            "volume": chosen_strike.get("volume"),
-            "iv": chosen_strike.get("iv"),
-            "delta": chosen_strike.get("delta"),
-            "gamma": chosen_strike.get("gamma"),
+                candidates.append({
+                    "strike": strike,
+                    "side": "PE",
+                    "score": round(score, 2),
+                    "oi": info["pe_oi"],
+                    "coi": info["pe_chg"],
+                    "volume": info["pe_vol"],
+                    "iv": info["pe_iv"],
+                    "ltp": info["pe_ltp"],
+                    "distance_from_atm": dist
+                })
+
+        if not candidates:
+            return None
+
+        candidates.sort(key=lambda x: (x["score"], x["volume"]), reverse=True)
+        return candidates[0]
+
+    # ----------------------------------------------------------------
+    # Compute PCR
+    # ----------------------------------------------------------------
+    def calculate_pcr(self, rows):
+        ce_oi = pe_oi = ce_vol = pe_vol = 0
+        for r in rows:
+            ce = r.get("CE") or {}
+            pe = r.get("PE") or {}
+            ce_oi += int(ce.get("openInterest") or 0)
+            pe_oi += int(pe.get("openInterest") or 0)
+            ce_vol += int(ce.get("totalTradedVolume") or 0)
+            pe_vol += int(pe.get("totalTradedVolume") or 0)
+        pcr_oi = (pe_oi / ce_oi) if ce_oi else 0
+        pcr_vol = (pe_vol / ce_vol) if ce_vol else 0
+        return round(pcr_oi, 2), round(pcr_vol, 2)
+
+    # ----------------------------------------------------------------
+    # Generate buy/sell signal
+    # ----------------------------------------------------------------
+    def generate_signal_from_analysis(self, analysis):
+        pcr_oi, pcr_vol = self.calculate_pcr(analysis["all_rows"])
+
+        ce_total = pe_total = 0
+        for r in analysis["strike_rows"]:
+            ce = r.get("CE") or {}
+            pe = r.get("PE") or {}
+            ce_total += int(ce.get("openInterest") or 0)
+            pe_total += int(pe.get("openInterest") or 0)
+
+        oi_ratio = (pe_total / ce_total) if ce_total else 0
+
+        bullish = bearish = 0
+        if pcr_oi > 1.4: bullish += 2
+        elif pcr_oi > 1.1: bullish += 1
+
+        if pcr_oi < 0.7: bearish += 2
+        elif pcr_oi < 0.9: bearish += 1
+
+        if oi_ratio > 1.3: bullish += 1
+        elif oi_ratio < 0.7: bearish += 1
+
+        signal = None
+        side = None
+
+        if bullish >= 3:
+            signal = "STRONG BUY"; side = "CE"
+        elif bullish == 2:
+            signal = "BUY"; side = "CE"
+        elif bearish >= 3:
+            signal = "STRONG SELL"; side = "PE"
+        elif bearish == 2:
+            signal = "SELL"; side = "PE"
+        else:
+            return None
+
+        best = self.select_optimal_strike(analysis, side)
+        if not best:
+            return None
+
+        return {
+            "symbol": analysis.get("symbol"),
+            "signal": signal,
+            "option_type": side,
+            "strike": best["strike"],
+            "atm": analysis["atm_strike"],
+            "distance_from_atm": best["distance_from_atm"],
+            "ltp": best["ltp"],
+            "oi": best["oi"],
+            "coi": best["coi"],
+            "volume": best["volume"],
+            "iv": best["iv"],
+            "score": best["score"],
             "pcr_oi": pcr_oi,
             "pcr_volume": pcr_vol,
             "oi_ratio": round(oi_ratio, 2),
-            "strike_score": chosen_strike.get("score"),
-            "selection_reason": chosen_strike.get("selection_reason"),
-            "signal_reason": "; ".join(reason),
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            "timestamp": now_str()
         }
 
-        return result
-            # ------------------ MAIN EXECUTION ENGINE ------------------
+    # ----------------------------------------------------------------
+    # Run for all symbols
+    # ----------------------------------------------------------------
     def run_all(self):
+
         all_signals = []
         dashboard_data = []
         detailed_rows = []
 
-        for symbol in self.symbols:
-            print(f"Processing {symbol}...")
-
-            # 1️⃣ Fetch chain
-            chain = self.fetch_option_chain(symbol)
-            if not chain or "records" not in chain:
+        for sym in self.symbols:
+            print(f"\n🔍 Processing {sym}")
+            raw = self.fetch_option_chain(sym)
+            if not raw:
+                print(f"❌ No data for {sym}")
                 continue
 
-            # 2️⃣ ATM ± window analysis
-            analysis = self.analyze_atm_strikes(chain)
+            analysis = self.analyze_atm_strikes(raw)
             if not analysis:
+                print(f"❌ ATM analysis error for {sym}")
                 continue
 
-            # 3️⃣ Generate signal (from Part-3)
-            signal = self.generate_signal_from_analysis(analysis)
-            if signal:
-                all_signals.append(signal)
+            analysis["symbol"] = sym
 
-            # 4️⃣ Add to dashboard view
+            sig = self.generate_signal_from_analysis(analysis)
+            if sig:
+                all_signals.append(sig)
+                print(f"   ✅ Signal {sig['signal']} @ {sig['strike']}")
+            else:
+                print(f"   ⏸ No strong signal for {sym}")
+
             dashboard_data.append({
-                "symbol": symbol,
-                "underlying": analysis.get("underlying"),
-                "atm_strike": analysis.get("atm_strike"),
-                "signal": signal.get("signal") if signal else "NO TRADE",
-                "option_type": signal.get("option_type") if signal else "-",
-                "strike_price": signal.get("strike_price") if signal else "-",
-                "pcr_oi": signal.get("pcr_oi") if signal else "-",
-                "oi_ratio": signal.get("oi_ratio") if signal else "-",
-                "timestamp": signal.get("timestamp") if signal else "-"
+                "symbol": sym,
+                "current_price": analysis["underlying"],
+                "atm_strike": analysis["atm_strike"],
+                "strikes_analyzed": analysis["strikes_analyzed"],
+                "signal": sig["signal"] if sig else None,
+                "timestamp": now_str()
             })
 
-            # 5️⃣ Prepare detailed strike-level rows
-            for row in analysis["strike_analysis"]:
+            for s in self.analyze_strike_strength(analysis["strike_rows"]):
                 detailed_rows.append({
-                    "symbol": symbol,
-                    "strike": row["strike"],
-                    "ce_oi": row["ce_oi"],
-                    "pe_oi": row["pe_oi"],
-                    "ce_chg": row["ce_chg"],
-                    "pe_chg": row["pe_chg"],
-                    "ce_vol": row["ce_vol"],
-                    "pe_vol": row["pe_vol"],
-                    "ce_strength": row["ce_strength"],
-                    "pe_strength": row["pe_strength"]
+                    "symbol": sym,
+                    **s
                 })
 
-        # ------------------ EXPORT SIGNAL CSV ------------------
-        self.save_csv("option_signals.csv", all_signals)
+            time_module.sleep(0.6)
 
-        # ------------------ EXPORT DETAILED STRIKE CSV ------------------
+        self.save_csv("option_signals.csv", all_signals)
         self.save_csv("detailed_option_data.csv", detailed_rows)
 
-        # ------------------ EXPORT DASHBOARD JSON ------------------
-        self.save_json("docs/dashboard.json", dashboard_data)
-
-        print("✅ All processing completed.")
-        print(f"Generated {len(all_signals)} trade signals.")
-
-        return {
+        final_json = {
+            "last_updated": now_str(),
             "signals": all_signals,
-            "dashboard": dashboard_data,
-            "detailed": detailed_rows
+            "market": [
+                {
+                    "symbol": d["symbol"],
+                    "price": d["current_price"],
+                    "atm": d["atm_strike"],
+                    "strikes": len(d["strikes_analyzed"]),
+                    "updated": d["timestamp"]
+                }
+                for d in dashboard_data
+            ]
         }
-            # ------------------ FILE WRITING UTILITIES ------------------
+
+        self.save_json("docs/dashboard.json", final_json)
+        os.makedirs("signals", exist_ok=True)
+        self.save_json("signals/latest.json", all_signals)
+
+        print("\n✅ Completed.")
+        return all_signals
+
+    # ----------------------------------------------------------------
+    # Save CSV
+    # ----------------------------------------------------------------
     def save_csv(self, filename, rows):
-        """
-        Save any list of dict rows into a CSV file.
-        Automatically creates header from keys.
-        """
-        if not rows:
-            print(f"⚠️ CSV skipped (no rows): {filename}")
-            return
-
-        import csv
-
         try:
+            keys = set()
+            for r in rows:
+                keys.update(r.keys())
+            keys = list(keys)
+
             with open(filename, "w", newline="", encoding="utf-8") as f:
-                writer = csv.DictWriter(f, fieldnames=rows[0].keys())
+                writer = csv.DictWriter(f, fieldnames=keys)
                 writer.writeheader()
-                writer.writerows(rows)
-
-            print(f"📄 CSV saved: {filename} ({len(rows)} rows)")
-
+                for r in rows:
+                    writer.writerow(r)
+            print(f"📄 Saved CSV: {filename}")
         except Exception as e:
-            print(f"❌ Error writing CSV {filename}: {e}")
+            print(f"❌ CSV error {e}")
 
+    # ----------------------------------------------------------------
+    # Save JSON
+    # ----------------------------------------------------------------
     def save_json(self, filename, data):
-        """
-        Save data (list or dict) into JSON.
-        Creates directories if needed.
-        """
-        import json
-        import os
-
         try:
-            # ensure directory exists
             os.makedirs(os.path.dirname(filename), exist_ok=True)
-
             with open(filename, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
-
             print(f"🟢 JSON saved: {filename}")
-
         except Exception as e:
-            print(f"❌ Error writing JSON {filename}: {e}")
-            # ------------------ FIXED MAIN RUNNER ------------------
+            print(f"❌ JSON error {filename}: {e}")
 
+# ==================================================================
+# MAIN
+# ==================================================================
 def main():
-    print("\n🔵 Starting NSE Option Signals Engine...")
-
-    try:
-        engine = AdvancedOptionSignalGenerator()
-
-        print("🔹 Running full analysis...")
-        results = engine.run_all()
-
-        # Save latest JSON for GitHub Pages
-        print("🔹 Saving signals JSON...")
-        os.makedirs("signals", exist_ok=True)
-        engine.save_json("signals/latest.json", results["signals"])
-
-        print("\n✅ All tasks completed successfully.")
-        print("📁 Files generated:")
-        print("   • signals/latest.json")
-        print("   • docs/dashboard.json")
-        print("   • option_signals.csv")
-        print("   • detailed_option_data.csv\n")
-
-    except Exception as e:
-        print("\n❌ Error:", e)
-
+    print("\n🔵 Starting NSE Option Signals…")
+    engine = AdvancedOptionSignalGenerator()
+    engine.run_all()
+    print("🔚 Done.")
 
 if __name__ == "__main__":
     main()
-    
+            
