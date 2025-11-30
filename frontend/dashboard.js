@@ -404,3 +404,31 @@ class OptionChainDashboard {
 document.addEventListener('DOMContentLoaded', () => {
     new OptionChainDashboard();
 });
+// Codespaces detection
+async function checkCodespaces() {
+    try {
+        const response = await fetch('/api/codespaces');
+        const data = await response.json();
+        
+        if (data.is_codespaces) {
+            document.getElementById('codespaces-info').classList.remove('d-none');
+            window.codespacesUrl = data.external_url;
+            
+            // Update page title
+            document.title = "📊 Option Chain (Codespaces)";
+        }
+    } catch (error) {
+        console.log('Not running in Codespaces');
+    }
+}
+
+function copyCodespacesUrl() {
+    if (window.codespacesUrl) {
+        navigator.clipboard.writeText(window.codespacesUrl).then(() => {
+            alert('Codespaces URL copied to clipboard!');
+        });
+    }
+}
+
+// Call this when dashboard loads
+checkCodespaces();
