@@ -65,6 +65,74 @@
         <!-- Trading signals will appear here -->
     </div>
 </div>
+        <!-- Trading Signals Section -->
+<div class="row mt-3">
+    <div class="col-md-8" id="trading-signals">
+        <!-- Trading signals will appear here -->
+    </div>
+    <div class="col-md-4" id="support-resistance">
+        <!-- Support & Resistance levels will appear here -->
+    </div>
+</div>
+
+<!-- Advanced Charts Section -->
+<div class="row mt-3">
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h6 class="mb-0">OI Skew Heatmap</h6>
+                <small class="text-muted">Bullish/Bearish bias by strike</small>
+            </div>
+            <div class="card-body">
+                <div id="chart-oi-skew"></div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h6 class="mb-0">Volume-OI Efficiency</h6>
+                <small class="text-muted">Trading conviction indicator</small>
+            </div>
+            <div class="card-body">
+                <div id="chart-volume-oi"></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row mt-3">
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h6 class="mb-0">OI Distribution</h6>
+                <small class="text-muted">Call vs Put concentration</small>
+            </div>
+            <div class="card-body">
+                <div id="chart-oi-dist"></div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h6 class="mb-0">Buildup Analysis</h6>
+                <small class="text-muted">Long/Short position buildup</small>
+            </div>
+            <div class="card-body">
+                <div id="chart-buildup"></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Auto-refresh toggle in navbar -->
+<div class="navbar-text ms-3">
+    <div class="form-check form-switch">
+        <input class="form-check-input" type="checkbox" id="auto-refresh-toggle" checked>
+        <label class="form-check-label text-white" for="auto-refresh-toggle">Auto-refresh</label>
+    </div>
+</div>
         <!-- Option Chain Table -->
         <div class="card mt-3">
             <div class="card-header d-flex justify-content-between">
